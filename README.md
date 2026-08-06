@@ -42,25 +42,23 @@
 
 ...
 The Secure OTA Firmware Update Framework includes a modern web-based dashboard that provides real-time monitoring and management of the entire firmware update process. The dashboard enables users to monitor device status, firmware versions, update progress, security verification, and event logs from any location with Internet access.
-
-## Dashboard Overview
+### Dashboard Overview
 
 | Dashboard | Device & Firmware |
 |-----------|-------------------|
-| ![](Web_1.png) | ![](Web_2.png) |
+| ![](Images/Web_1.png) | ![](Images/Web_2.png) |
 
-## OTA Update Status
+### OTA Status
 
 | OTA Success | Device Status |
 |-------------|---------------|
-| ![](OTA_Img_1.png) | ![](OTA_Img_2.png) |
+| ![](Images/OTA_Img_1.png) | ![](Images/OTA_Img_2.png) |
 
-## Event Logs & Monitoring
+### Monitoring & Logs
 
-| Event Logs | STM32 Monitoring |
-|------------|------------------|
-| ![](Web_3.png) | ![](OTA_Img_3.png) |
-
+| Event Log | STM32 Monitoring |
+|-----------|------------------|
+| ![](Images/Web_3.png) | ![](Images/OTA_Img_3.png) |
 ---
 
 ## Dashboard Features
