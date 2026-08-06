@@ -1,0 +1,1105 @@
+/* USER CODE BEGIN Header */
+/**
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2026 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+
+#include <Checksum.h>
+#include "main.h"
+#include "Protocol.h"
+#include "FirmwareHeader.h"
+#include "Flash_Driver.h"
+#include "BootManager.h"
+#include "FirmwareInfo.h"
+#include <stdio.h>
+#include <string.h>
+#include "SHA256.h"
+#include "update_log.h"
+
+
+#include "UART_Update.h"
+
+
+int __io_putchar(int ch)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    return ch;
+}
+
+
+
+uint32_t FlashAddress = APP_ADDRESS;
+
+#define DEVICE_ID    1
+
+const uint8_t BootloaderAuthToken[16] =
+{
+    'S','T','M','3','2',
+    '_',
+    'O','T','A',
+    '_',
+    '2','0','2','6',
+    '!',
+    '\0'
+};
+
+
+
+uint32_t FirmwareSize = 0;
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef huart1;
+
+/* USER CODE BEGIN PV */
+
+/* USER CODE END PV */
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_USART1_UART_Init(void);
+/* USER CODE BEGIN PFP */
+static void Bootloader_ProcessUpdateRequest(FirmwareInfo_t *CurrentFirmwareInfo,
+                                             uint8_t *updateInProgress);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+void Delay(volatile uint32_t count)
+{
+	while(count--)
+	{
+		__NOP();
+	}
+}
+
+void Blink(uint8_t count)
+{
+	for(uint8_t i = 0; i < count; i++)
+	{
+		// LED ON (PC13 is active LOW)
+		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+		HAL_Delay(200);
+
+		// LED OFF
+		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
+		HAL_Delay(200);
+	}
+}
+
+/*
+ * FIX: This is the entire body that used to live inline under
+ * `case CMD_UPDATE:` in the main while(1) switch. It is now a
+ * standalone function so it can be invoked from TWO places:
+ *
+ *   1. The normal command loop, when an explicit CMD_UPDATE (0x55)
+ *      byte is received while the bootloader is idling in its
+ *      while(1) loop (e.g. a second attempt after a prior failure
+ *      left the device sitting in bootloader mode).
+ *
+ *   2. Immediately on bootloader entry when otaRequested == 1
+ *      (see main(), below) -- WITHOUT waiting for a second command
+ *      byte first. This is the actual fix for "must press reset":
+ *      the ESP32 only ever sends a single 0x55 (to the application,
+ *      to trigger the reset-into-bootloader), then watches for
+ *      BOOTLOADER_READY and sends the firmware header immediately
+ *      afterward. It never sends a second CMD_UPDATE byte to the
+ *      bootloader itself. Previously the bootloader ignored that
+ *      and sat waiting for one anyway, so the first byte of the
+ *      incoming header got consumed as a bogus command byte
+ *      (0x90 -> "Unknown CMD" -> NACK -> update fails), and only
+ *      a manual reset (which left the device correctly parked in
+ *      the command loop from a *previous* failed attempt) allowed
+ *      a stray 0x55 to be interpreted correctly.
+ */
+static void Bootloader_ProcessUpdateRequest(FirmwareInfo_t *CurrentFirmwareInfo,
+                                             uint8_t *updateInProgress)
+{
+    char msg[160];
+
+    *updateInProgress = 0;
+
+    strcpy(msg, "CMD_UPDATE Received\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    Protocol_SendACK();
+
+    strcpy(msg, "Waiting for Header...\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    Protocol_SendBootloaderReady();
+
+    HAL_StatusTypeDef status = Protocol_ReceiveHeader();
+
+    sprintf(msg, "ReceiveHeader Status = %d\r\n", status);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    if(status != HAL_OK)
+    {
+        strcpy(msg, "Header Receive Failed\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        Protocol_SendNACK();
+
+        HAL_Delay(200);
+
+        strcpy(msg, "Jumping to existing application\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        Bootloader_JumpToApplication();
+
+        while(1);
+    }
+
+    strcpy(msg, "Header Received Successfully\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    sprintf(msg,
+            "Size      : %lu\r\n"
+            "Version   : %lu\r\n"
+            "CRC       : 0x%08lX\r\n"
+            "Device ID : %lu\r\n",
+            (unsigned long)gFirmwareHeader.firmwareSize,
+            (unsigned long)gFirmwareHeader.firmwareVersion,
+            (unsigned long)gFirmwareHeader.firmwareCRC,
+            (unsigned long)gFirmwareHeader.deviceID);
+
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    strcpy(msg, "Auth Token : ");
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)gFirmwareHeader.authToken,
+                      16,
+                      HAL_MAX_DELAY);
+
+    strcpy(msg, "\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    /************************************************
+     * DEVICE AUTHENTICATION
+     ************************************************/
+    if(gFirmwareHeader.deviceID != DEVICE_ID)
+    {
+        strcpy(msg, "Invalid Device ID\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        Protocol_SendNACK();
+
+        HAL_Delay(200);
+
+        strcpy(msg, "Jumping to existing application...\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        Bootloader_JumpToApplication();
+
+        while(1);
+    }
+
+    if(memcmp(gFirmwareHeader.authToken, BootloaderAuthToken, 16) != 0)
+    {
+        strcpy(msg, "Authentication Failed\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        UpdateLog_Print(
+            CurrentFirmwareInfo->version,
+            gFirmwareHeader.firmwareVersion,
+            gFirmwareHeader.deviceID,
+            0,      // Authentication FAIL
+            0,
+            0,
+            0,
+            0       // FAILED
+        );
+
+        Protocol_SendNACK();
+
+        HAL_Delay(200);
+
+        strcpy(msg, "Jumping to existing application...\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        Bootloader_JumpToApplication();
+
+        while(1);
+    }
+
+    strcpy(msg, "Authentication Successful\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    /************************************************
+     * VERSION CHECK
+     ************************************************/
+
+    FirmwareInfo_Load(CurrentFirmwareInfo);
+
+    if(CurrentFirmwareInfo->version == 0xFFFFFFFF)
+    {
+        CurrentFirmwareInfo->version = 0;
+    }
+
+    sprintf(msg,
+            "Installed Version : %lu\r\n",
+            (unsigned long)CurrentFirmwareInfo->version);
+
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+
+    if(gFirmwareHeader.firmwareVersion <= CurrentFirmwareInfo->version)
+    {
+        strcpy(msg, "Firmware Rejected (Older Version)\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        Protocol_SendNACK();
+
+        HAL_Delay(200);
+
+        strcpy(msg, "Jumping to existing application...\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        Bootloader_JumpToApplication();
+
+        while(1);
+    }
+
+    /************************************************
+     * START UPDATE
+     *
+     * NOTE: Do NOT send an ACK here. Any receiver-side logic
+     * waiting for "erase complete" could latch onto an early ACK
+     * instead of the real one below (sent only after erase
+     * actually finishes), and start sending packet 0 while the
+     * STM32 is still blocked inside Flash_ErasePage(). Only one
+     * ACK is sent for this phase - after erase completes.
+     ************************************************/
+
+    if(Flash_Unlock() != HAL_OK)
+    {
+        strcpy(msg, "Flash Unlock Failed\r\n");
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+        Protocol_SendNACK();
+
+        while(1);
+    }
+
+    {
+        HAL_StatusTypeDef eraseStatus = HAL_OK;
+
+        for(uint32_t addr = APP_ADDRESS; addr < FW_INFO_ADDRESS; addr += 1024)
+        {
+            if(Flash_ErasePage(addr) != HAL_OK)
+            {
+                eraseStatus = HAL_ERROR;
+                break;
+            }
+        }
+
+        if(eraseStatus != HAL_OK)
+        {
+            Flash_Lock();
+
+            strcpy(msg, "Erase Failed\r\n");
+            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+            Protocol_SendNACK();
+
+            return;
+        }
+    }
+
+    Flash_Lock();
+
+    FlashAddress = APP_ADDRESS;
+
+    *updateInProgress = 1;
+
+    strcpy(msg, "Application Area Erased\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+    Protocol_SendACK();   /* single, real ACK for this phase */
+}
+
+/* USER CODE END 0 */
+
+/**
+ * @brief  The application entry point.
+ * @retval int
+ */
+int main(void)
+{
+    /* USER CODE BEGIN 1 */
+
+    /* USER CODE END 1 */
+
+    /* MCU Configuration--------------------------------------------------------*/
+
+    HAL_Init();
+
+    /* Configure the system clock */
+    SystemClock_Config();
+
+    /* Initialize all configured peripherals */
+    MX_GPIO_Init();
+    MX_USART1_UART_Init();
+
+    /* USER CODE BEGIN 2 */
+
+    uint8_t cmd = 0;
+
+    /* Tracks a command byte that was received during the 5s
+     * "wait for host" window, so it is never silently discarded. */
+    uint8_t havePendingCmd = 0;
+
+    /* Set (only) at the top of the bootloader_mode while(1) loop; tracked
+     * here so a `goto bootloader_mode` from the OTA-requested path does not
+     * skip over its initialization. */
+    uint8_t updateInProgress = 0;
+
+    /* FIX: When entry into bootloader mode happens because the
+     * application requested an OTA update (otaRequested flag),
+     * the update sequence is started IMMEDIATELY after printing
+     * BOOTLOADER_READY, instead of waiting inside the command
+     * loop for a second CMD_UPDATE (0x55) byte that the ESP32
+     * never actually sends in this path. This is the fix for the
+     * "must press reset button" symptom. */
+    uint8_t autoStartUpdate = 0;
+
+    FirmwareInfo_t CurrentFirmwareInfo;
+
+    /* Single message buffer reused for all UART output in this function. */
+    char msg[160];
+
+    /* DEBUG: confirm bootloader entry immediately, before anything else */
+    strcpy(msg, "\r\n[BOOT] Bootloader Started\r\n");
+
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+
+
+
+    /*
+     * Load installed firmware information
+     * from Flash memory
+     */
+    FirmwareInfo_Load(&CurrentFirmwareInfo);
+
+    /*
+     * First time bootloader execution
+     * Flash contains 0xFFFFFFFF
+     */
+    if (CurrentFirmwareInfo.version == 0xFFFFFFFF)
+    {
+        CurrentFirmwareInfo.version = 0;
+    }
+
+    /* Read OTA request flag once */
+    uint8_t otaRequested = Bootloader_IsUpdateRequested();
+
+    /* DEBUG: show exactly what the flag check returned */
+
+    sprintf(msg,
+            "[BOOT] otaRequested = %d (reserved = 0x%08lX)\r\n",
+            otaRequested,
+            (unsigned long)CurrentFirmwareInfo.reserved);
+
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+
+    if (otaRequested)
+    {
+        printf("[BOOT] OTA Update Requested\r\n");
+
+        /*
+         * Do NOT clear/save the OTA flag here. The flag is cleared
+         * only on confirmed success, in the CMD_END handler.
+         */
+
+        /* FIX: mark that we should start the update sequence
+         * immediately once BOOTLOADER_READY has been announced,
+         * rather than waiting on a second command byte. */
+        autoStartUpdate = 1;
+
+        goto bootloader_mode;
+    }
+
+    /*
+     * Wait for update command for 5 seconds
+     */
+    if (HAL_UART_Receive(&huart1, &cmd, 1, 5000) == HAL_TIMEOUT)
+    {
+        uint32_t appStack;
+        uint32_t appEntry;
+
+        appStack = *(__IO uint32_t *)APP_ADDRESS;
+        appEntry = *(__IO uint32_t *)(APP_ADDRESS + 4);
+
+
+
+        sprintf(msg, "\r\n=========== Bootloader ===========\r\n"
+                     "APP ADDRESS : 0x%08lX\r\n"
+                     "APP STACK   : 0x%08lX\r\n"
+                     "APP ENTRY   : 0x%08lX\r\n",
+                (unsigned long)APP_ADDRESS,
+                (unsigned long)appStack,
+                (unsigned long)appEntry);
+
+        HAL_UART_Transmit(&huart1,
+                          (uint8_t *)msg,
+                          strlen(msg),
+                          HAL_MAX_DELAY);
+
+
+        if (((appStack & 0x2FFE0000U) == 0x20000000U) &&
+            (appEntry != 0xFFFFFFFFU) &&
+            (appEntry != 0x00000000U))
+        {
+            strcpy(msg, "Application Found\r\n");
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)msg,
+                              strlen(msg),
+                              HAL_MAX_DELAY);
+
+            HAL_Delay(100);
+
+            Bootloader_JumpToApplication();
+        }
+        else
+        {
+            strcpy(msg, "No Valid Application\r\n");
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)msg,
+                              strlen(msg),
+                              HAL_MAX_DELAY);
+        }
+    }
+    else
+    {
+        /* A byte WAS received within the 5s window (not a timeout).
+         * This byte is no longer discarded. It is kept in `cmd` and
+         * `havePendingCmd` is set, so the very first iteration of the
+         * bootloader_mode while(1) loop below processes it directly
+         * instead of issuing a fresh HAL_UART_Receive and losing it. */
+        printf("[BOOT] Byte received during wait window: 0x%02X\r\n", cmd);
+
+        havePendingCmd = 1;
+    }
+
+    bootloader_mode:
+
+    strcpy(msg, "BOOTLOADER_READY\r\n");
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+
+    HAL_Delay(50);
+
+    /* FIX: if we got here because the application requested an OTA
+     * update, start the update sequence right now instead of
+     * waiting for a second command byte. The ESP32 only sends a
+     * single 0x55 (to the application) in this path, then watches
+     * for BOOTLOADER_READY and sends the header directly. */
+    if (autoStartUpdate)
+    {
+        autoStartUpdate = 0;
+        Bootloader_ProcessUpdateRequest(&CurrentFirmwareInfo, &updateInProgress);
+        /* Falls through into the normal command loop below to
+         * handle the subsequent CMD_DATA / CMD_END sequence. */
+    }
+
+    while (1)
+    {
+        if (havePendingCmd)
+        {
+            havePendingCmd = 0;
+        }
+        else
+        {
+            /* Bounded wait instead of HAL_MAX_DELAY, so the
+             * bootloader can never get stuck here forever if the
+             * ESP32 never responds (no WiFi, no server, crashed,
+             * or simply never sends CMD_EXIT). */
+            HAL_StatusTypeDef rxStatus =
+                HAL_UART_Receive(&huart1, &cmd, 1, 60000);
+
+            if (rxStatus == HAL_TIMEOUT)
+            {
+                uint32_t appStack = *(__IO uint32_t *)APP_ADDRESS;
+                uint32_t appEntry = *(__IO uint32_t *)(APP_ADDRESS + 4);
+
+                if (((appStack & 0x2FFE0000U) == 0x20000000U) &&
+                    (appEntry != 0xFFFFFFFFU) &&
+                    (appEntry != 0x00000000U))
+                {
+                    strcpy(msg, "Bootloader Idle Timeout - Jumping to Application\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                    HAL_Delay(50);
+                    Bootloader_JumpToApplication();
+                }
+
+                continue;
+            }
+            else if (rxStatus != HAL_OK)
+            {
+                __HAL_UART_CLEAR_OREFLAG(&huart1);
+                __HAL_UART_CLEAR_FEFLAG(&huart1);
+                __HAL_UART_CLEAR_NEFLAG(&huart1);
+                continue;
+            }
+
+            __HAL_UART_CLEAR_OREFLAG(&huart1);
+            __HAL_UART_CLEAR_FEFLAG(&huart1);
+            __HAL_UART_CLEAR_NEFLAG(&huart1);
+        }
+
+        switch(cmd)
+        {
+
+        /********************************************************
+         * GET INSTALLED VERSION
+         ********************************************************/
+        case CMD_GET_VERSION:
+        {
+            FirmwareInfo_Load(&CurrentFirmwareInfo);
+
+            if(CurrentFirmwareInfo.version == 0xFFFFFFFF)
+                CurrentFirmwareInfo.version = 0;
+
+            sprintf(msg, "VERSION:%lu\r\n", CurrentFirmwareInfo.version);
+
+            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+            break;
+        }
+
+        /********************************************************
+         * START UPDATE (explicit CMD_UPDATE byte received while
+         * already idling in the command loop)
+         ********************************************************/
+        case CMD_UPDATE:
+        {
+            Bootloader_ProcessUpdateRequest(&CurrentFirmwareInfo, &updateInProgress);
+            break;
+        }
+
+        /********************************************************
+         * RECEIVE DATA
+         ********************************************************/
+        case CMD_DATA:
+        {
+            if(updateInProgress == 0)
+            {
+                strcpy(msg, "ERROR : Update not started\r\n");
+                HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                Protocol_SendNACK();
+                break;
+            }
+
+            /*--------------------------------------------------
+             * STEP 1 : Receive length bytes FIRST. No transmits
+             * before this point.
+             *------------------------------------------------*/
+            uint8_t lenBytes[2];
+
+            if(HAL_UART_Receive(&huart1, lenBytes, 2, HAL_MAX_DELAY) != HAL_OK)
+            {
+                Protocol_FlushRx();
+                Protocol_SendNACK();
+                break;
+            }
+
+            uint16_t length = (uint16_t)lenBytes[0] |
+                               ((uint16_t)lenBytes[1] << 8);
+
+            /*--------------------------------------------------
+             * STEP 2 : Sanity-check length.
+             *------------------------------------------------*/
+            if(length == 0 || length > PACKET_SIZE)
+            {
+                sprintf(msg, "ERROR : Invalid Length %u\r\n", length);
+                HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                Protocol_FlushRx();
+                Protocol_SendNACK();
+                break;
+            }
+
+            if((FlashAddress + length) > (APP_ADDRESS + gFirmwareHeader.firmwareSize))
+            {
+                strcpy(msg, "ERROR : Length exceeds firmware size\r\n");
+                HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                Protocol_FlushRx();
+                Protocol_SendNACK();
+                break;
+            }
+
+            /*--------------------------------------------------
+                 * STEP 3 : Receive payload + 2-byte CRC16.
+                 *------------------------------------------------*/
+                if(HAL_UART_Receive(&huart1, PacketBuffer, length, 10000) != HAL_OK)
+                {
+                    strcpy(msg, "ERROR : Packet Receive Failed\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                    Protocol_FlushRx();
+                    Protocol_SendNACK();
+                    break;
+                }
+
+                uint8_t crcBytes[2];
+
+                if(HAL_UART_Receive(&huart1, crcBytes, 2, 2000) != HAL_OK)
+                {
+                    strcpy(msg, "ERROR : CRC Receive Failed\r\n");
+                    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                    Protocol_FlushRx();
+                    Protocol_SendNACK();
+                    break;
+                }
+
+                uint16_t recvCRC = ((uint16_t)crcBytes[0] << 8) | crcBytes[1];
+
+                /*--------------------------------------------------
+                 * STEP 4 : Verify CRC16 over lenBytes + payload.
+                 *------------------------------------------------*/
+                uint16_t calcCRC = Protocol_CRC16(lenBytes, 2, 0xFFFF);
+                calcCRC = Protocol_CRC16(PacketBuffer, length, calcCRC);
+
+                if(calcCRC != recvCRC)
+                {
+                    sprintf(msg,
+                            "ERROR : CRC Mismatch (calc=0x%04X recv=0x%04X)\r\n",
+                            calcCRC, recvCRC);
+                    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                    Protocol_FlushRx();
+                    Protocol_SendNACK();
+                    break;
+                }
+
+
+            /*--------------------------------------------------
+             * STEP 5 : Safe to print debug info now.
+             *------------------------------------------------*/
+            sprintf(msg,
+                    "\r\n========== CMD_DATA ==========\r\n"
+                    "Packet Length : %u (checksum OK)\r\n",
+                    length);
+            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+            /*--------------------------------------------------
+             * STEP 6 : Unlock, write, verify flash
+             *------------------------------------------------*/
+            if(Flash_Unlock() != HAL_OK)
+            {
+                strcpy(msg, "ERROR : Flash Unlock Failed\r\n");
+                HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                Protocol_SendNACK();
+                break;
+            }
+
+            if(Flash_WriteBuffer(FlashAddress, PacketBuffer, length) != HAL_OK)
+            {
+                sprintf(msg,
+                        "ERROR : Flash Write Failed @ 0x%08lX\r\n",
+                        (unsigned long)FlashAddress);
+                HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                Flash_Lock();
+                Protocol_SendNACK();
+                break;
+            }
+
+            if(Flash_VerifyBuffer(FlashAddress, PacketBuffer, length) != HAL_OK)
+            {
+                sprintf(msg,
+                        "ERROR : Verify Failed @ 0x%08lX\r\n",
+                        (unsigned long)FlashAddress);
+                HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+                Flash_Lock();
+                Protocol_SendNACK();
+                break;
+            }
+
+            Flash_Lock();
+
+            FlashAddress += length;
+
+            sprintf(msg,
+                    "Flash OK -> Next 0x%08lX\r\n",
+                    (unsigned long)FlashAddress);
+            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+            Protocol_SendACK();
+
+            break;
+        }
+
+        /********************************************************
+         * UPDATE COMPLETE
+         ********************************************************/
+        case CMD_END:
+        {
+            uint32_t crc;
+            uint8_t hash[32];
+
+            if(updateInProgress == 0)
+            {
+                Protocol_SendNACK();
+                break;
+            }
+
+            crc = CRC32_CalculateFlash(APP_ADDRESS, gFirmwareHeader.firmwareSize);
+            SHA256_CalculateFlash(APP_ADDRESS, gFirmwareHeader.firmwareSize, hash);
+
+            /* ---- DEBUG BLOCK ---- */
+            sprintf(msg, "DEBUG Computed CRC32 = 0x%08lX (expected 0x%08lX)\r\n",
+                    (unsigned long)crc, (unsigned long)gFirmwareHeader.firmwareCRC);
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+            strcpy(msg, "DEBUG Computed SHA256 = ");
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+            for(int i = 0; i < 32; i++) {
+                sprintf(msg, "%02X", hash[i]);
+                HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+            }
+            strcpy(msg, "\r\n");
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+            strcpy(msg, "DEBUG First 16 flash bytes: ");
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+            for(int i = 0; i < 16; i++) {
+                sprintf(msg, "%02X ", *(volatile uint8_t*)(APP_ADDRESS + i));
+                HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+            }
+            strcpy(msg, "\r\n");
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+            strcpy(msg, "DEBUG Last 16 flash bytes: ");
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+            for(int i = 0; i < 16; i++) {
+                sprintf(msg, "%02X ", *(volatile uint8_t*)(APP_ADDRESS + gFirmwareHeader.firmwareSize - 16 + i));
+                HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+            }
+            strcpy(msg, "\r\n");
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+            /* ---- END DEBUG BLOCK ---- */
+
+            SHA256_CalculateFlash(APP_ADDRESS, gFirmwareHeader.firmwareSize, hash);
+
+            if((crc != gFirmwareHeader.firmwareCRC) ||
+               (memcmp(hash, gFirmwareHeader.sha256, 32) != 0))
+            {
+                UpdateLog_Print(
+                    CurrentFirmwareInfo.version,
+                    gFirmwareHeader.firmwareVersion,
+                    gFirmwareHeader.deviceID,
+                    1,
+                    1,
+                    0,
+                    0,
+                    0
+                );
+
+                strcpy(msg, "CRC/SHA Failed\r\n");
+                HAL_UART_Transmit(&huart1,
+                                  (uint8_t *)msg,
+                                  strlen(msg),
+                                  HAL_MAX_DELAY);
+
+                Protocol_SendNACK();
+
+                updateInProgress = 0;
+
+                break;
+            }
+
+            strcpy(msg, "CRC PASS\r\n");
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)msg,
+                              strlen(msg),
+                              HAL_MAX_DELAY);
+
+            strcpy(msg, "SHA PASS\r\n");
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)msg,
+                              strlen(msg),
+                              HAL_MAX_DELAY);
+
+            /* Save firmware information */
+            CurrentFirmwareInfo.version  = gFirmwareHeader.firmwareVersion;
+            CurrentFirmwareInfo.crc      = gFirmwareHeader.firmwareCRC;
+            CurrentFirmwareInfo.deviceID = gFirmwareHeader.deviceID;
+            CurrentFirmwareInfo.reserved = UPDATE_FLAG_CLEAR;
+
+            FirmwareInfo_Save(&CurrentFirmwareInfo);
+
+            Protocol_SendACK();
+
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)"LOG:Device ID = 1\r\n",
+                              strlen("LOG:Device ID = 1\r\n"),
+                              HAL_MAX_DELAY);
+
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)"LOG:Authentication = PASS\r\n",
+                              strlen("LOG:Authentication = PASS\r\n"),
+                              HAL_MAX_DELAY);
+
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)"LOG:Status = SUCCESS\r\n",
+                              strlen("LOG:Status = SUCCESS\r\n"),
+                              HAL_MAX_DELAY);
+
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)"LOG: END\r\n",
+                              strlen("LOG: END\r\n"),
+                              HAL_MAX_DELAY);
+
+            while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) == RESET)
+            {
+            }
+
+            sprintf(msg,
+                    "Firmware Update Successful\r\n"
+                    "Flash Version  : %lu\r\n"
+                    "Flash CRC      : 0x%08lX\r\n"
+                    "Flash DeviceID : %lu\r\n"
+                    "Flash Flag     : 0x%08lX\r\n",
+                    (unsigned long)*(volatile uint32_t *)FW_INFO_ADDRESS,
+                    (unsigned long)*(volatile uint32_t *)(FW_INFO_ADDRESS + 4),
+                    (unsigned long)*(volatile uint32_t *)(FW_INFO_ADDRESS + 8),
+                    (unsigned long)*(volatile uint32_t *)(FW_INFO_ADDRESS + 12));
+
+            HAL_UART_Transmit(&huart1,
+                              (uint8_t *)msg,
+                              strlen(msg),
+                              HAL_MAX_DELAY);
+
+            HAL_Delay(100);
+
+            NVIC_SystemReset();
+
+            break;
+        }
+
+        /********************************************************
+         * EXIT
+         ********************************************************/
+        case CMD_EXIT:
+        {
+            Protocol_SendACK();
+
+            HAL_Delay(1000);
+
+            Bootloader_JumpToApplication();
+
+            break;
+        }
+
+        /********************************************************
+         * UNKNOWN COMMAND
+         ********************************************************/
+        default:
+        {
+            sprintf(msg, "Unknown CMD : 0x%02X\r\n", cmd);
+            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+
+            Protocol_FlushRx();
+            Protocol_SendNACK();
+
+            break;
+        }
+
+        } /* end switch(cmd) */
+
+    } /* end while(1) */
+
+    /* USER CODE END 2 */
+}
+
+/**
+ * @brief System Clock Configuration
+ * @retval None
+ */
+void SystemClock_Config(void)
+{
+	RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+	RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+	/** Initializes the RCC Oscillators according to the specified parameters
+	 * in the RCC_OscInitTypeDef structure.
+	 */
+	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+	RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+	RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+	RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+	RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+	RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+	{
+		Error_Handler();
+	}
+
+	/** Initializes the CPU, AHB and APB buses clocks
+	 */
+	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+			|RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+	RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+	RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+	RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+	RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+	if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+	{
+		Error_Handler();
+	}
+}
+
+/**
+ * @brief USART1 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_USART1_UART_Init(void)
+{
+
+	/* USER CODE BEGIN USART1_Init 0 */
+
+	/* USER CODE END USART1_Init 0 */
+
+	/* USER CODE BEGIN USART1_Init 1 */
+
+	/* USER CODE END USART1_Init 1 */
+	huart1.Instance = USART1;
+	huart1.Init.BaudRate = 115200;
+	huart1.Init.WordLength = UART_WORDLENGTH_8B;
+	huart1.Init.StopBits = UART_STOPBITS_1;
+	huart1.Init.Parity = UART_PARITY_NONE;
+	huart1.Init.Mode = UART_MODE_TX_RX;
+	huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+	huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+	if (HAL_UART_Init(&huart1) != HAL_OK)
+	{
+		Error_Handler();
+	}
+	/* USER CODE BEGIN USART1_Init 2 */
+
+	/* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_GPIO_Init(void)
+{
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+	/* USER CODE BEGIN MX_GPIO_Init_1 */
+
+	/* USER CODE END MX_GPIO_Init_1 */
+
+	/* GPIO Ports Clock Enable */
+	__HAL_RCC_GPIOC_CLK_ENABLE();
+	__HAL_RCC_GPIOD_CLK_ENABLE();
+	__HAL_RCC_GPIOA_CLK_ENABLE();
+
+	/*Configure GPIO pin Output Level */
+	HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
+	/*Configure GPIO pin : LED_Pin */
+	GPIO_InitStruct.Pin = LED_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
+
+	/* USER CODE BEGIN MX_GPIO_Init_2 */
+
+	/* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
+
+/**
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
+void Error_Handler(void)
+{
+	/* USER CODE BEGIN Error_Handler_Debug */
+	/* User can add his own implementation to report the HAL error return state */
+	__disable_irq();
+	while (1)
+	{
+	}
+	/* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+ * @brief  Reports the name of the source file and the source line number
+ *         where the assert_param error has occurred.
+ * @param  file: pointer to the source file name
+ * @param  line: assert_param error line source number
+ * @retval None
+ */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+	/* USER CODE BEGIN 6 */
+	/* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+	/* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

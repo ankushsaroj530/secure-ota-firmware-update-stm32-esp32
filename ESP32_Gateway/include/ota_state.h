@@ -1,0 +1,29 @@
+#ifndef OTA_STATE_H
+#define OTA_STATE_H
+
+enum OTA_State
+{
+    OTA_IDLE = 0,
+
+    OTA_CHECK_VERSION,
+
+    OTA_DOWNLOAD,
+
+    OTA_ENTER_BOOTLOADER,
+
+    OTA_WAIT_BOOTLOADER,
+
+    OTA_SEND_HEADER,
+
+    OTA_SEND_DATA,
+
+    OTA_SEND_END,
+
+    OTA_VERIFY,
+
+    OTA_SUCCESS,
+
+    OTA_FAILED
+};
+
+#endif

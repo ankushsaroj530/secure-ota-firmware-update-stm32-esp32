@@ -1,0 +1,123 @@
+#include "Protocol.h"
+#include <string.h>
+
+extern UART_HandleTypeDef huart1;
+
+/* Packet Buffer */
+uint8_t PacketBuffer[PACKET_SIZE];
+
+/* Firmware Header */
+extern FirmwareHeader_t gFirmwareHeader;
+
+
+/*----------------------------------------------------------*/
+/* Send ACK */
+/*----------------------------------------------------------*/
+void Protocol_SendACK(void)
+{
+    char msg[] = "ACK\r\n";
+
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+}
+
+
+/*----------------------------------------------------------*/
+/* Send NACK */
+/*----------------------------------------------------------*/
+void Protocol_SendNACK(void)
+{
+    char msg[] = "NACK\r\n";
+
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+}
+
+/*----------------------------------------------------------*/
+/* Send Installed Firmware Version                          */
+/*----------------------------------------------------------*/
+void Protocol_SendInstalledVersion(uint32_t version)
+{
+    char msg[40];
+
+    sprintf(msg, "VERSION:%lu\r\n", version);
+
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+}
+
+
+/*----------------------------------------------------------*/
+/* Receive Firmware Header */
+/*---
+ */
+
+HAL_StatusTypeDef Protocol_ReceiveHeader(void)
+{
+    HAL_StatusTypeDef status;
+    char msg[128];
+
+    /* Debug: Bootloader is waiting for header */
+    strcpy(msg, "Waiting for Firmware Header...\r\n");
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+
+    status = HAL_UART_Receive(
+                &huart1,
+                (uint8_t *)&gFirmwareHeader,
+                sizeof(FirmwareHeader_t),
+                HAL_MAX_DELAY);
+
+    /* Debug: HAL_UART_Receive returned */
+    strcpy(msg, "HAL_UART_Receive Returned\r\n");
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+
+    sprintf(msg, "Header Receive Status : %d\r\n", status);
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+
+    sprintf(msg,
+            "Size      : %lu\r\n"
+            "Version   : %lu\r\n"
+            "CRC       : 0x%08lX\r\n"
+            "Device ID : %lu\r\n",
+            (unsigned long)gFirmwareHeader.firmwareSize,
+            (unsigned long)gFirmwareHeader.firmwareVersion,
+            (unsigned long)gFirmwareHeader.firmwareCRC,
+            (unsigned long)gFirmwareHeader.deviceID);
+
+    HAL_UART_Transmit(&huart1,
+                      (uint8_t *)msg,
+                      strlen(msg),
+                      HAL_MAX_DELAY);
+
+    return status;
+}
+/*----------------------------------------------------------*/
+/* Receive Firmware Packet */
+/*----------------------------------------------------------*/
+HAL_StatusTypeDef Protocol_ReceivePacket(uint16_t length)
+{
+    if(length == 0 || length > PACKET_SIZE)
+    {
+        return HAL_ERROR;
+    }
+
+    return HAL_UART_Receive(&huart1,
+                            PacketBuffer,
+                            length,
+                            HAL_MAX_DELAY);
+}

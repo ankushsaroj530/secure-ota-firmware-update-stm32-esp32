@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section name="Workbench">
+	<item key="hasShownOverlayPopupBefore" value="true"/>
+	<item key="replaceBarOpen" value="false"/>
+	<list key="searchhistory">
+		<item value="148"/>
+		<item value="#define PACKET_SIZE 128"/>
+		<item value="int main(void)"/>
+		<item value="#define FLASH_END_ADDRESS"/>
+		<item value="SystemClock_Config();"/>
+		<item value="void SystemInit(void)"/>
+		<item value="uint32_t FirmwareSize = 0;"/>
+		<item value="#define VECT_TAB_OFFSET  0x00000000U"/>
+	</list>
+</section>

@@ -1,0 +1,4 @@
+#Thu Jul 23 15:34:54 IST 2026
+__DEFAULT__=false
+expression=\#define USER_VECT_TAB_ADDRESS
+org.eclipse.help.ui.localSearch.master=true

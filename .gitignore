@@ -1,0 +1,13 @@
+# STM32 build outputs
+Debug/
+Release/
+
+# VS Code
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Temporary files
+*.log

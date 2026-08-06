@@ -1,0 +1,9 @@
+#ifndef INC_BOOTMANAGER_H_
+#define INC_BOOTMANAGER_H_
+#include<stdint.h>
+
+void Bootloader_Run(void);
+void Bootloader_JumpToApplication(void);
+uint8_t Bootloader_IsUpdateRequested(void);
+
+#endif
