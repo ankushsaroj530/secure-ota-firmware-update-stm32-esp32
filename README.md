@@ -497,25 +497,6 @@ Or deploy using **Render**.
 
 ---
 
-# Project Structure
-
-```text
-Secure_OTA_Firmware_System
-│
-├── STM32_Bootloader
-├── STM32_Application
-├── ESP32_Gateway
-├── Flask_Server
-├── Dashboard
-├── Firmware
-├── Documentation
-├── Images
-├── README.md
-└── LICENSE
-```
-
----
-
 # Publication
 
 This project was presented as a poster at **INCIP-2026**, hosted by the Department of Electronics and Communication Engineering, Central University of Karnataka (August 20–21, 2026), under the guidance of **Veeresh G. Kasabegoudar**.
