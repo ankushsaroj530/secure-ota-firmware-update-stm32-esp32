@@ -52,13 +52,11 @@ internet connectivity and communicates with the remote firmware server,
 while the STM32 acts as the target embedded device receiving and verifying
 the updated firmware.
 
-### Circuit 1 – Hardware Connection
+### Circuit – Hardware Connection
 
-![Hardware Circuit 1](./Circuit_1.jpeg)
+![Hardware Circuit 1](./Circuit_1.png)
 
-### Circuit 2 – Hardware Connection
 
-![Hardware Circuit 2](./Circuit_2.jpeg)
 
 
 # Problem Statement
