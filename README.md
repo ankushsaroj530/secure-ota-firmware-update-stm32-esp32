@@ -1,4 +1,4 @@
-# Secure OTA Firmware Update Framework for STM32 Using ESP32
+# A cloud-connected embedded firmware management and Internet-based OTA update framework for STM32 devices, using an ESP32 gateway and a custom UART bootloader, with firmware integrity verification and a real-time web-based monitoring dashboard.
 
 ### Design and Development of a Secure Internet-Based OTA Firmware Update Framework for STM32 Embedded Systems
 
@@ -10,6 +10,10 @@
 ![License](https://img.shields.io/badge/License-MIT-red)
 
 ---
+
+## 🎥 Project Demo
+
+[![Watch the Demo](https://img.youtube.com/vi/YOUR_VIDEO_ID/0.jpg)](https://youtu.be/VNkXt3kDdFw)
 
 # Project Overview
 
