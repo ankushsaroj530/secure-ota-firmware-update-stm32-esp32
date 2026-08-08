@@ -13,7 +13,7 @@
 
 ## 🎥 Project Demo
 
-[![Watch the Demo](https://img.youtube.com/vi/YOUR_VIDEO_ID/0.jpg)](https://youtu.be/VNkXt3kDdFw)
+[![Watch the Demo](https://youtu.be/Ytl7VcvTI4U?si=koN1fkz7maOdwz13)](https://youtu.be/VNkXt3kDdFw)
 
 # Project Overview
 
