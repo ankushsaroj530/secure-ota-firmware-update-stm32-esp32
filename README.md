@@ -44,6 +44,23 @@ This project solves these limitations by implementing a secure cloud-based OTA f
 
 ---
 
+## 🔌 Hardware Circuit
+
+The hardware architecture consists of an **STM32 microcontroller** and an
+**ESP32 Wi-Fi gateway** connected through **UART**. The ESP32 provides
+internet connectivity and communicates with the remote firmware server,
+while the STM32 acts as the target embedded device receiving and verifying
+the updated firmware.
+
+### Circuit 1 – Hardware Connection
+
+![Hardware Circuit 1](./Circuit_1.jpeg)
+
+### Circuit 2 – Hardware Connection
+
+![Hardware Circuit 2](./Circuit_2.jpeg)
+
+
 # Problem Statement
 
 Embedded devices deployed in the field — inside enclosures, mounted in inaccessible locations, or distributed across many sites — are difficult and expensive to update using traditional wired methods. Every firmware revision, bug fix, or feature addition otherwise requires a technician to physically visit each device with a programmer.
